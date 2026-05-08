@@ -6,6 +6,7 @@ const io = require('socket.io')(http, { cors: { origin: "*", methods: ["GET", "P
 app.get('/', (req, res) => { res.send('Serveur Survie Pro OK'); });
 
 // Le serveur décide du monde une seule fois au démarrage
+const serverStartTime = Date.now();
 const worldSeeds = {
     x: Math.random() * 1000000,
     z: Math.random() * 1000000
@@ -23,10 +24,11 @@ io.on('connection', (socket) => {
 
     // Envoi des Seeds et des joueurs actuels
     socket.emit('init', { 
-        id: socket.id, 
-        players, 
-        seeds: worldSeeds 
-    });
+    id: socket.id, 
+    players, 
+    seeds: worldSeeds,
+    startTime: serverStartTime // <--- NOUVEAU
+});
     
     io.emit('playerCount', Object.keys(players).length);
     socket.broadcast.emit('playerJoined', players[socket.id]);
