@@ -1,7 +1,12 @@
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
-const io = require('socket.io')(http);
+const io = require('socket.io')(http, {
+    cors: {
+        origin: "*", // Autorise tous les sites web à s'y connecter
+        methods: ["GET", "POST"]
+    }
+});
 
 // Sert le fichier HTML
 app.use(express.static(__dirname));
