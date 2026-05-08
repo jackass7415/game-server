@@ -3,23 +3,34 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-app.get('/', (req, res) => { res.send('Serveur de Survie 3D OK'); });
+app.get('/', (req, res) => { res.send('Serveur Survie Pro OK'); });
+
+// Le serveur décide du monde une seule fois au démarrage
+const worldSeeds = {
+    x: Math.random() * 1000000,
+    z: Math.random() * 1000000
+};
 
 const players = {};
 
 io.on('connection', (socket) => {
-    console.log(`Joueur connecté: ${socket.id}`);
+    // Attribution du rôle et stockage
+    players[socket.id] = { 
+        id: socket.id, 
+        x: 0, y: 30, z: 0, ry: 0, 
+        color: Math.random() * 0xffffff // Couleur aléatoire pour chaque joueur
+    };
 
-    // Création du joueur avec position par défaut
-    players[socket.id] = { id: socket.id, x: 0, y: 30, z: 0, ry: 0, isAttacking: false };
+    // Envoi des Seeds et des joueurs actuels
+    socket.emit('init', { 
+        id: socket.id, 
+        players, 
+        seeds: worldSeeds 
+    });
     
-    // On envoie au nouveau joueur la liste des joueurs existants
-    socket.emit('init', { id: socket.id, players });
-    
-    // On prévient les autres qu'un nouveau est là
+    io.emit('playerCount', Object.keys(players).length);
     socket.broadcast.emit('playerJoined', players[socket.id]);
 
-    // Réception des mouvements 3D
     socket.on('playerState', (data) => {
         if (players[socket.id]) {
             players[socket.id] = { ...players[socket.id], ...data };
@@ -27,12 +38,17 @@ io.on('connection', (socket) => {
         }
     });
 
+    // Relais du Chat (identique au prototype)
+    socket.on('chatMessage', (msg) => {
+        socket.broadcast.emit('chatMessage', { text: msg, id: socket.id });
+    });
+
     socket.on('disconnect', () => {
-        console.log(`Déconnexion: ${socket.id}`);
         delete players[socket.id];
         io.emit('playerLeft', socket.id);
+        io.emit('playerCount', Object.keys(players).length);
     });
 });
 
 const PORT = process.env.PORT || 10000;
-http.listen(PORT, '0.0.0.0', () => { console.log(`Serveur prêt sur le port ${PORT}`); });
+http.listen(PORT, '0.0.0.0', () => { console.log(`Serveur prêt`); });
