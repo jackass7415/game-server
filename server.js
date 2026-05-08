@@ -3,7 +3,7 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-app.get('/', (req, res) => { res.send('Serveur OK'); });
+app.get('/', (req, res) => { res.send('Serveur Boomerang OK'); });
 
 let playersCount = 0;
 
@@ -14,10 +14,11 @@ io.on('connection', (socket) => {
 
     socket.on('playerState', (data) => { socket.broadcast.emit('enemyState', data); });
     socket.on('throwBoomerang', () => { socket.broadcast.emit('enemyThrow'); });
-    
-    // NOUVEAU : On relaie QUI est mort
-    socket.on('playerDied', (data) => { 
-        socket.broadcast.emit('enemyDied', data); 
+    socket.on('playerDied', (data) => { socket.broadcast.emit('enemyDied', data); });
+
+    // --- NOUVEAU : RELAIS DU CHAT ---
+    socket.on('chatMessage', (msg) => {
+        socket.broadcast.emit('chatMessage', msg);
     });
 
     socket.on('disconnect', () => { playersCount--; });
