@@ -3,51 +3,36 @@ const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-app.get('/', (req, res) => { res.send('Serveur Boomerang OK'); });
+app.get('/', (req, res) => { res.send('Serveur de Survie 3D OK'); });
 
-let scores = { p1: 0, p2: 0 };
-let assignedRoles = {}; // Stocke qui est qui { socketId: 'p1' ou 'p2' }
+const players = {};
 
 io.on('connection', (socket) => {
-    // On cherche quel rôle est libre
-    let role = null;
-    const currentRoles = Object.values(assignedRoles);
+    console.log(`Joueur connecté: ${socket.id}`);
+
+    // Création du joueur avec position par défaut
+    players[socket.id] = { id: socket.id, x: 0, y: 30, z: 0, ry: 0, isAttacking: false };
     
-    if (!currentRoles.includes('p1')) role = 'p1';
-    else if (!currentRoles.includes('p2')) role = 'p2';
-    else role = 'spectateur';
-
-    assignedRoles[socket.id] = role;
-    console.log(`Joueur connecté: ${role}`);
-
-    // On envoie le rôle et le score
-    socket.emit('init', { role, scores });
-
-    socket.on('playerState', (data) => { socket.broadcast.emit('enemyState', data); });
-    socket.on('throwBoomerang', () => { socket.broadcast.emit('enemyThrow'); });
+    // On envoie au nouveau joueur la liste des joueurs existants
+    socket.emit('init', { id: socket.id, players });
     
-    socket.on('playerDied', (data) => {
-        let winner = (data.victim === 'p1') ? 'p2' : 'p1';
-        scores[winner]++;
-        io.emit('scoreUpdate', scores);
-        socket.broadcast.emit('enemyDied', data);
+    // On prévient les autres qu'un nouveau est là
+    socket.broadcast.emit('playerJoined', players[socket.id]);
 
-        if (scores[winner] >= 10) {
-            io.emit('gameWin', { winner });
-            scores = { p1: 0, p2: 0 };
+    // Réception des mouvements 3D
+    socket.on('playerState', (data) => {
+        if (players[socket.id]) {
+            players[socket.id] = { ...players[socket.id], ...data };
+            socket.broadcast.emit('enemyState', players[socket.id]);
         }
     });
 
-    // Chat : on relaie aussi le rôle pour avoir la bonne couleur
-    socket.on('chatMessage', (msg) => {
-        socket.broadcast.emit('chatMessage', { text: msg, role: assignedRoles[socket.id] });
-    });
-
     socket.on('disconnect', () => {
-        console.log(`Déconnexion de: ${assignedRoles[socket.id]}`);
-        delete assignedRoles[socket.id];
+        console.log(`Déconnexion: ${socket.id}`);
+        delete players[socket.id];
+        io.emit('playerLeft', socket.id);
     });
 });
 
 const PORT = process.env.PORT || 10000;
-http.listen(PORT, '0.0.0.0', () => { console.log(`Serveur prêt`); });
+http.listen(PORT, '0.0.0.0', () => { console.log(`Serveur prêt sur le port ${PORT}`); });
