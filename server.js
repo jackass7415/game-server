@@ -62,6 +62,11 @@ io.on('connection', (socket) => {
         io.to(hostId).emit('hitEntity', data);
     });
 
+    // 🟢 NOUVEAU : Un monstre est mort, on prévient tout le monde
+    socket.on('entityDied', (id) => {
+        socket.broadcast.emit('entityDied', id);
+    });
+
     socket.on('chatMessage', (msg) => {
         socket.broadcast.emit('chatMessage', { text: msg, id: socket.id });
     });
