@@ -14,6 +14,9 @@ const worldSeeds = {
 
 const players = {};
 
+// 🟢 NOUVEAU 1/3 : Le grand livre mémoire du monde
+let destroyedObjects = []; 
+
 io.on('connection', (socket) => {
     // Attribution du rôle et stockage
     players[socket.id] = { 
@@ -22,13 +25,14 @@ io.on('connection', (socket) => {
         color: Math.random() * 0xffffff // Couleur aléatoire pour chaque joueur
     };
 
-    // Envoi des Seeds et des joueurs actuels
+    // Envoi des Seeds, du temps, et de la mémoire
     socket.emit('init', { 
-    id: socket.id, 
-    players, 
-    seeds: worldSeeds,
-    startTime: serverStartTime // <--- NOUVEAU
-});
+        id: socket.id, 
+        players, 
+        seeds: worldSeeds,
+        startTime: serverStartTime,
+        destroyedObjects: destroyedObjects // 🟢 NOUVEAU 2/3 : On envoie la liste aux nouveaux
+    });
     
     io.emit('playerCount', Object.keys(players).length);
     socket.broadcast.emit('playerJoined', players[socket.id]);
@@ -37,6 +41,14 @@ io.on('connection', (socket) => {
         if (players[socket.id]) {
             players[socket.id] = { ...players[socket.id], ...data };
             socket.broadcast.emit('enemyState', players[socket.id]);
+        }
+    });
+
+    // 🟢 NOUVEAU 3/3 : Quand un joueur détruit un truc (Arbre, Rocher, Coffre)
+    socket.on('objectDestroyed', (objectId) => {
+        if (!destroyedObjects.includes(objectId)) {
+            destroyedObjects.push(objectId); // Le serveur s'en souvient pour toujours
+            socket.broadcast.emit('objectDestroyed', objectId); // Il prévient les autres joueurs en direct
         }
     });
 
