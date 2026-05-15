@@ -1,7 +1,7 @@
 {
-  "name": "boomerang-online",
+  "name": "little-guy-online",
   "version": "1.0.0",
-  "description": "Jeu multijoueur en ligne",
+  "description": "Little Guy -- serveur multijoueur (rooms 3 joueurs via socket.io)",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
