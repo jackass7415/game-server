@@ -1,235 +1,188 @@
+// ============================================================================
+// Little Guy -- Serveur multijoueur (rooms jusqu'à 3 joueurs)
+// ============================================================================
+// Architecture room-based : chaque partie en ligne (Story ou Versus) se déroule
+// dans une room identifiée par un code 6 chars. Le premier joueur d'une room
+// est l'host (slot 1). Les suivants prennent les slots 2 et 3. Migration auto
+// si l'host se déconnecte. Tous les events sont scopés à leur room.
+//
+// Events client -> serveur :
+//   joinRoom { code, gameMode }   : rejoint/crée une room
+//   leave                          : quitte la room sans fermer le socket
+//   playerState { x, y, vx, ... }  : envoyé à 20Hz, broadcast aux autres
+//   hit { targetSlot, dmg, ... }   : dégât cross-network (versus)
+//   roundEvent { type, ... }       : événement match/manche (versus wins, etc.)
+//   startGame { ... }              : host signale le début de partie
+//
+// Events serveur -> client :
+//   init { id, slot, code, gameMode, isHost, seed, players }
+//   playerList { players }
+//   joined { id, slot }   /   left { id, slot }
+//   playerState { id, slot, ... } (relay)
+//   hit { fromSlot, ... } (relay)
+//   roundEvent { fromSlot, ... } (relay)
+//   startGame { ... } (broadcast)
+//   hostAssigned   (migration)
+//   roomFull       (code occupé par 3 joueurs)
+// ============================================================================
+
 const express = require('express');
 const app = express();
 const http = require('http').createServer(app);
 const io = require('socket.io')(http, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
-app.get('/', (req, res) => { res.send('Serveur Survie Pro - MMO OK'); });
+app.get('/', (req, res) => { res.send('Little Guy multiplayer server -- OK'); });
 
-// Le serveur décide du monde une seule fois au démarrage
-const serverStartTime = Date.now();
-const worldSeeds = {
-    x: Math.random() * 1000000,
-    z: Math.random() * 1000000
-};
+const rooms = {};
 
-const players = {};
-let destroyedObjects = [];
-
-// 👑 LE FAMEUX MAÎTRE DU JEU !
-let hostId = null;
-
-// ============================================================================
-// === LITTLE GUY (celeste.html) -- système de rooms (jusqu'à 3 joueurs/room) ===
-// ============================================================================
-// Rooms keyed par code (6 chars). gameMode = 'story' | 'versus'. Slots 1/2/3.
-// Le 1er joueur à rejoindre devient host (slot 1). Seed partagé pour la
-// génération procédurale Story (chunks identiques côté tous les clients).
-const lgRooms = {};
-function lgGenRoomCode() {
+function genRoomCode() {
+    // Alphabet sans caractères ambigus : 0/O et 1/I exclus
     const C = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
     do {
         code = '';
         for (let i = 0; i < 6; i++) code += C[Math.floor(Math.random() * C.length)];
-    } while (lgRooms[code]);
+    } while (rooms[code]);
     return code;
 }
-function lgAssignSlot(room) {
+function assignSlot(room) {
     const used = new Set(Object.values(room.players).map(p => p.slot));
     for (let s of [1, 2, 3]) if (!used.has(s)) return s;
-    return 0; // pas de slot dispo (room pleine)
+    return 0; // pas de slot dispo
 }
 
 io.on('connection', (socket) => {
-    // Attribution du rôle et stockage
-    players[socket.id] = { 
-        id: socket.id, 
-        x: 0, y: 30, z: 0, ry: 0, 
-        color: Math.random() * 0xffffff 
-    };
-
-    // Si personne n'est le chef, le nouveau devient le chef
-    if (!hostId) {
-        hostId = socket.id;
-        console.log(`Nouvel Hôte assigné: ${hostId}`);
-    }
-
-    // Envoi des Seeds et des infos vitales
-    socket.emit('init', { 
-        id: socket.id, 
-        players, 
-        seeds: worldSeeds,
-        startTime: serverStartTime,
-        destroyedObjects: destroyedObjects,
-        isHost: (socket.id === hostId) // <-- C'EST ÇA QUI MANQUAIT !
-    });
-    
-    io.emit('playerCount', Object.keys(players).length);
-    socket.broadcast.emit('playerJoined', players[socket.id]);
-
-    socket.on('playerState', (data) => {
-        if (players[socket.id]) {
-            players[socket.id] = { ...players[socket.id], ...data };
-            socket.broadcast.emit('enemyState', players[socket.id]);
-        }
-    });
-
-    socket.on('objectDestroyed', (objectId) => {
-        if (!destroyedObjects.includes(objectId)) {
-            destroyedObjects.push(objectId); 
-            socket.broadcast.emit('objectDestroyed', objectId); 
-        }
-    });
-
-    // 🟢 RELAIS DE L'IA (L'Hôte envoie la position des monstres aux autres)
-    socket.on('syncEntities', (entitiesData) => {
-        if (socket.id === hostId) {
-            socket.broadcast.emit('syncEntities', entitiesData);
-        }
-    });
-
-    // 🟢 FRAPPE D'UN MONSTRE (Le client demande à l'Hôte de faire les dégâts)
-    socket.on('hitEntity', (data) => {
-        io.to(hostId).emit('hitEntity', data);
-    });
-
-    // 🟢 CERTIFICAT DE DÉCÈS (L'Hôte prévient tout le monde de supprimer le monstre)
-    socket.on('entityDied', (id) => {
-        socket.broadcast.emit('entityDied', id);
-    });
-
-    socket.on('chatMessage', (msg) => {
-        socket.broadcast.emit('chatMessage', { text: msg, id: socket.id });
-    });
-
-    socket.on('disconnect', () => {
-        delete players[socket.id];
-
-        // 🟢 PASSATION DE POUVOIR : Si le chef quitte, on donne la couronne au suivant
-        if (socket.id === hostId) {
-            const remainingPlayers = Object.keys(players);
-            if (remainingPlayers.length > 0) {
-                hostId = remainingPlayers[0];
-                io.to(hostId).emit('hostAssigned');
-                console.log(`Changement d'Hôte: ${hostId}`);
-            } else {
-                hostId = null; // Plus personne sur le serveur
-            }
-        }
-
-        io.emit('playerLeft', socket.id);
-        io.emit('playerCount', Object.keys(players).length);
-
-        // === LITTLE GUY : nettoyage de la room ===
-        const lgRoomId = socket.data && socket.data.lgRoom;
-        if (lgRoomId && lgRooms[lgRoomId]) {
-            const room = lgRooms[lgRoomId];
-            const wasHost = (room.hostId === socket.id);
-            delete room.players[socket.id];
-            socket.to(lgRoomId).emit('lg_left', { id: socket.id, slot: socket.data.lgSlot });
-            if (Object.keys(room.players).length === 0) {
-                delete lgRooms[lgRoomId];
-            } else if (wasHost) {
-                room.hostId = Object.keys(room.players)[0];
-                io.to(room.hostId).emit('lg_hostAssigned');
-            }
-        }
-    });
+    console.log('[connect]', socket.id);
 
     // ========================================================================
-    // === LITTLE GUY : événements de room ====================================
+    // joinRoom : rejoint ou crée une room
     // ========================================================================
-    // joinRoom : code = string (peut être null/empty -> on en génère un nouveau)
-    // gameMode : 'story' ou 'versus'
-    socket.on('lg_joinRoom', ({ code, gameMode }) => {
-        // Code propre : majuscules, 6 chars max
+    socket.on('joinRoom', ({ code, gameMode }) => {
+        // Nettoie le code : majuscules, alphanumeric, 6 chars max
         let roomId = (code || '').toString().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 6);
-        if (!roomId) roomId = lgGenRoomCode();
+        if (!roomId) roomId = genRoomCode();
 
-        let room = lgRooms[roomId];
+        let room = rooms[roomId];
         if (!room) {
-            // Création d'une nouvelle room (ce joueur devient host)
+            // Création -> ce joueur devient host
             room = { players: {}, hostId: socket.id, gameMode: gameMode || 'story', seed: Math.floor(Math.random() * 1e9) };
-            lgRooms[roomId] = room;
+            rooms[roomId] = room;
+            console.log('[create-room]', roomId, 'mode=' + room.gameMode);
         }
-        // Vérification room pleine (max 3 joueurs)
+        // Vérification capacité
         if (Object.keys(room.players).length >= 3) {
-            socket.emit('lg_roomFull', { code: roomId });
+            socket.emit('roomFull', { code: roomId });
             return;
         }
-        // Si la room existe déjà, le mode est imposé par l'host
-        const slot = lgAssignSlot(room);
-        if (slot === 0) { socket.emit('lg_roomFull', { code: roomId }); return; }
+        const slot = assignSlot(room);
+        if (slot === 0) { socket.emit('roomFull', { code: roomId }); return; }
 
         room.players[socket.id] = { id: socket.id, slot, ready: false };
         socket.join(roomId);
-        socket.data.lgRoom = roomId;
-        socket.data.lgSlot = slot;
+        socket.data.roomId = roomId;
+        socket.data.slot = slot;
+        console.log('[join]', socket.id, '-> room', roomId, 'slot', slot, room.hostId === socket.id ? '(host)' : '');
 
-        // Envoi info init au joueur
-        socket.emit('lg_init', {
+        socket.emit('init', {
             id: socket.id, slot, code: roomId, gameMode: room.gameMode,
             isHost: socket.id === room.hostId, seed: room.seed,
             players: Object.values(room.players)
         });
-        // Notifie les autres dans la room
-        socket.to(roomId).emit('lg_joined', { id: socket.id, slot });
-        // Notifie aussi le nouveau venu de tous les autres (déjà via 'players' dans init)
-        // → Mais les autres ont besoin de la liste à jour aussi
-        io.to(roomId).emit('lg_playerList', { players: Object.values(room.players) });
+        socket.to(roomId).emit('joined', { id: socket.id, slot });
+        io.to(roomId).emit('playerList', { players: Object.values(room.players) });
     });
 
-    // Quitter la room (retour menu, etc.) sans fermer le socket
-    socket.on('lg_leave', () => {
-        const roomId = socket.data.lgRoom;
-        if (!roomId || !lgRooms[roomId]) return;
-        const room = lgRooms[roomId];
+    // ========================================================================
+    // leave : quitte la room sans fermer le socket
+    // ========================================================================
+    socket.on('leave', () => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        const room = rooms[roomId];
         const wasHost = (room.hostId === socket.id);
         delete room.players[socket.id];
         socket.leave(roomId);
-        socket.to(roomId).emit('lg_left', { id: socket.id, slot: socket.data.lgSlot });
-        socket.data.lgRoom = null;
-        socket.data.lgSlot = null;
+        socket.to(roomId).emit('left', { id: socket.id, slot: socket.data.slot });
+        socket.data.roomId = null;
+        socket.data.slot = null;
         if (Object.keys(room.players).length === 0) {
-            delete lgRooms[roomId];
+            delete rooms[roomId];
+            console.log('[delete-room]', roomId);
         } else if (wasHost) {
             room.hostId = Object.keys(room.players)[0];
-            io.to(room.hostId).emit('lg_hostAssigned');
-            io.to(roomId).emit('lg_playerList', { players: Object.values(room.players) });
+            io.to(room.hostId).emit('hostAssigned');
+            io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+            console.log('[host-migrate]', roomId, '->', room.hostId);
         } else {
-            io.to(roomId).emit('lg_playerList', { players: Object.values(room.players) });
+            io.to(roomId).emit('playerList', { players: Object.values(room.players) });
         }
     });
 
-    // État joueur (position, animation, HP) -- broadcast aux autres de la room
-    socket.on('lg_playerState', (data) => {
-        const roomId = socket.data.lgRoom;
+    // ========================================================================
+    // playerState : position + animation (~20Hz) -> relay aux autres
+    // ========================================================================
+    socket.on('playerState', (data) => {
+        const roomId = socket.data.roomId;
         if (!roomId) return;
-        socket.to(roomId).emit('lg_playerState', { id: socket.id, slot: socket.data.lgSlot, ...data });
+        socket.to(roomId).emit('playerState', { id: socket.id, slot: socket.data.slot, ...data });
     });
 
-    // Hit cross-réseau (attaquant -> serveur -> cible). Cible applique les dégâts.
-    socket.on('lg_hit', (data) => {
-        const roomId = socket.data.lgRoom;
+    // ========================================================================
+    // hit : dégât cross-network (versus). Relay à la cible (autres clients).
+    // Le client cible est autoritaire sur son propre HP.
+    // ========================================================================
+    socket.on('hit', (data) => {
+        const roomId = socket.data.roomId;
         if (!roomId) return;
-        socket.to(roomId).emit('lg_hit', { fromSlot: socket.data.lgSlot, ...data });
+        socket.to(roomId).emit('hit', { fromSlot: socket.data.slot, ...data });
     });
 
-    // Événement de manche/match (versus) -- broadcast tous les autres.
-    socket.on('lg_roundEvent', (data) => {
-        const roomId = socket.data.lgRoom;
+    // ========================================================================
+    // roundEvent : événement de manche/match (versus wins, restart, etc.)
+    // Relayé à tous les membres de la room.
+    // ========================================================================
+    socket.on('roundEvent', (data) => {
+        const roomId = socket.data.roomId;
         if (!roomId) return;
-        io.to(roomId).emit('lg_roundEvent', { fromSlot: socket.data.lgSlot, ...data });
+        io.to(roomId).emit('roundEvent', { fromSlot: socket.data.slot, ...data });
     });
 
-    // Signal "start game" envoyé par l'host quand la room est prête.
-    socket.on('lg_startGame', (data) => {
-        const roomId = socket.data.lgRoom;
-        if (!roomId || !lgRooms[roomId]) return;
-        if (socket.id !== lgRooms[roomId].hostId) return; // seul l'host peut lancer
-        io.to(roomId).emit('lg_startGame', data || {});
+    // ========================================================================
+    // startGame : signal de l'host -> tous les clients lancent le mode
+    // ========================================================================
+    socket.on('startGame', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        if (socket.id !== rooms[roomId].hostId) return; // seul l'host peut lancer
+        io.to(roomId).emit('startGame', data || {});
+        console.log('[start-game]', roomId, 'by', socket.id);
+    });
+
+    // ========================================================================
+    // Déconnexion : cleanup de la room
+    // ========================================================================
+    socket.on('disconnect', () => {
+        console.log('[disconnect]', socket.id);
+        const roomId = socket.data && socket.data.roomId;
+        if (roomId && rooms[roomId]) {
+            const room = rooms[roomId];
+            const wasHost = (room.hostId === socket.id);
+            delete room.players[socket.id];
+            socket.to(roomId).emit('left', { id: socket.id, slot: socket.data.slot });
+            if (Object.keys(room.players).length === 0) {
+                delete rooms[roomId];
+                console.log('[delete-room]', roomId);
+            } else if (wasHost) {
+                room.hostId = Object.keys(room.players)[0];
+                io.to(room.hostId).emit('hostAssigned');
+                io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+                console.log('[host-migrate]', roomId, '->', room.hostId);
+            } else {
+                io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+            }
+        }
     });
 });
 
 const PORT = process.env.PORT || 10000;
-http.listen(PORT, '0.0.0.0', () => { console.log(`Serveur prêt`); });
+http.listen(PORT, '0.0.0.0', () => { console.log('Little Guy server ready on :' + PORT); });
