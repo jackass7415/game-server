@@ -169,6 +169,27 @@ io.on('connection', (socket) => {
     });
 
     // ========================================================================
+    // worldSync : l'host broadcast l'état des entités (enemies, npcs, projectiles, etc.)
+    // Relay direct aux autres membres de la room. Sécurité : seul l'host peut émettre.
+    // ========================================================================
+    socket.on('worldSync', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        if (socket.id !== rooms[roomId].hostId) return;
+        socket.to(roomId).emit('worldSync', data);
+    });
+
+    // ========================================================================
+    // entityHit : un client non-host signale qu'il a frappé une entité.
+    // L'host reçoit et applique le dégât sur son entité (autoritaire).
+    // ========================================================================
+    socket.on('entityHit', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        io.to(rooms[roomId].hostId).emit('entityHit', { fromSlot: socket.data.slot, ...data });
+    });
+
+    // ========================================================================
     // startGame : signal de l'host -> tous les clients lancent le mode
     // ========================================================================
     socket.on('startGame', (data) => {
