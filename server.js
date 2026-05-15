@@ -45,10 +45,13 @@ function genRoomCode() {
     } while (rooms[code]);
     return code;
 }
-function assignSlot(room) {
-    const used = new Set(Object.values(room.players).map(p => p.slot));
-    for (let s of [1, 2, 3]) if (!used.has(s)) return s;
-    return 0; // pas de slot dispo
+// Reassigne tous les slots selon l'ordre d'arrivée (joinTime).
+// Le plus ancien joueur restant devient host (slot 1), les suivants P2 et P3.
+// Appelé uniquement en lobby (avant `gameStarted = true`) pour garder une numérotation cohérente.
+function reassignSlots(room) {
+    const sorted = Object.values(room.players).sort((a, b) => a.joinTime - b.joinTime);
+    sorted.forEach((p, i) => p.slot = i + 1);
+    if (sorted.length > 0) room.hostId = sorted[0].id;
 }
 
 io.on('connection', (socket) => {
@@ -64,8 +67,8 @@ io.on('connection', (socket) => {
 
         let room = rooms[roomId];
         if (!room) {
-            // Création -> ce joueur devient host
-            room = { players: {}, hostId: socket.id, gameMode: gameMode || 'story', seed: Math.floor(Math.random() * 1e9) };
+            // Création -> ce joueur devient host (slot 1 après reassign)
+            room = { players: {}, hostId: socket.id, gameMode: gameMode || 'story', seed: Math.floor(Math.random() * 1e9), gameStarted: false };
             rooms[roomId] = room;
             console.log('[create-room]', roomId, 'mode=' + room.gameMode);
         }
@@ -74,22 +77,31 @@ io.on('connection', (socket) => {
             socket.emit('roomFull', { code: roomId });
             return;
         }
-        const slot = assignSlot(room);
-        if (slot === 0) { socket.emit('roomFull', { code: roomId }); return; }
 
-        room.players[socket.id] = { id: socket.id, slot, ready: false };
+        // Ajoute le joueur avec son joinTime (ordre d'arrivée)
+        room.players[socket.id] = { id: socket.id, slot: 0, joinTime: Date.now(), ready: false };
+        // En lobby : reassigne tous les slots par ordre d'arrivée -> host = slot 1, suivants = 2, 3
+        if (!room.gameStarted) reassignSlots(room);
+        else {
+            // En jeu : pas de reassign (les autres joueurs ont déjà leurs slots fixés). On donne juste le premier libre.
+            const used = new Set(Object.values(room.players).map(p => p.slot).filter(s => s > 0));
+            for (let s of [1, 2, 3]) if (!used.has(s)) { room.players[socket.id].slot = s; break; }
+        }
+
+        const mySlot = room.players[socket.id].slot;
         socket.join(roomId);
         socket.data.roomId = roomId;
-        socket.data.slot = slot;
-        console.log('[join]', socket.id, '-> room', roomId, 'slot', slot, room.hostId === socket.id ? '(host)' : '');
+        socket.data.slot = mySlot;
+        console.log('[join]', socket.id, '-> room', roomId, 'slot', mySlot, room.hostId === socket.id ? '(host)' : '');
 
         socket.emit('init', {
-            id: socket.id, slot, code: roomId, gameMode: room.gameMode,
+            id: socket.id, slot: mySlot, code: roomId, gameMode: room.gameMode,
             isHost: socket.id === room.hostId, seed: room.seed,
             players: Object.values(room.players)
         });
-        socket.to(roomId).emit('joined', { id: socket.id, slot });
-        io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+        socket.to(roomId).emit('joined', { id: socket.id, slot: mySlot });
+        // Broadcast la liste mise à jour (avec potentiellement des slots réattribués)
+        io.to(roomId).emit('playerList', { players: Object.values(room.players), hostId: room.hostId });
     });
 
     // ========================================================================
@@ -108,13 +120,22 @@ io.on('connection', (socket) => {
         if (Object.keys(room.players).length === 0) {
             delete rooms[roomId];
             console.log('[delete-room]', roomId);
+            return;
+        }
+        // En lobby : reassigne les slots (compacte 1/2/3 selon ordre d'arrivée)
+        if (!room.gameStarted) {
+            reassignSlots(room);
+            io.to(roomId).emit('slotReassigned', { players: Object.values(room.players), hostId: room.hostId });
+            if (wasHost) console.log('[host-migrate]', roomId, '->', room.hostId, '(lobby reassign)');
         } else if (wasHost) {
-            room.hostId = Object.keys(room.players)[0];
+            // En jeu : on garde les slots mais on désigne un nouvel host
+            const sorted = Object.values(room.players).sort((a, b) => a.joinTime - b.joinTime);
+            room.hostId = sorted[0].id;
             io.to(room.hostId).emit('hostAssigned');
-            io.to(roomId).emit('playerList', { players: Object.values(room.players) });
-            console.log('[host-migrate]', roomId, '->', room.hostId);
+            io.to(roomId).emit('playerList', { players: Object.values(room.players), hostId: room.hostId });
+            console.log('[host-migrate]', roomId, '->', room.hostId, '(in-game, slot conservé)');
         } else {
-            io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+            io.to(roomId).emit('playerList', { players: Object.values(room.players), hostId: room.hostId });
         }
     });
 
@@ -154,6 +175,8 @@ io.on('connection', (socket) => {
         const roomId = socket.data.roomId;
         if (!roomId || !rooms[roomId]) return;
         if (socket.id !== rooms[roomId].hostId) return; // seul l'host peut lancer
+        // Marque la room comme "en jeu" pour figer les slots (pas de reassign si quelqu'un part en cours de partie)
+        rooms[roomId].gameStarted = true;
         io.to(roomId).emit('startGame', data || {});
         console.log('[start-game]', roomId, 'by', socket.id);
     });
@@ -172,13 +195,22 @@ io.on('connection', (socket) => {
             if (Object.keys(room.players).length === 0) {
                 delete rooms[roomId];
                 console.log('[delete-room]', roomId);
+                return;
+            }
+            // En lobby : reassigne (compacte les slots + nouveau host = plus ancien)
+            if (!room.gameStarted) {
+                reassignSlots(room);
+                io.to(roomId).emit('slotReassigned', { players: Object.values(room.players), hostId: room.hostId });
+                if (wasHost) console.log('[host-migrate]', roomId, '->', room.hostId, '(lobby reassign)');
             } else if (wasHost) {
-                room.hostId = Object.keys(room.players)[0];
+                // En jeu : host quitte -> nouveau host = plus ancien restant, slot conservé
+                const sorted = Object.values(room.players).sort((a, b) => a.joinTime - b.joinTime);
+                room.hostId = sorted[0].id;
                 io.to(room.hostId).emit('hostAssigned');
-                io.to(roomId).emit('playerList', { players: Object.values(room.players) });
-                console.log('[host-migrate]', roomId, '->', room.hostId);
+                io.to(roomId).emit('playerList', { players: Object.values(room.players), hostId: room.hostId });
+                console.log('[host-migrate]', roomId, '->', room.hostId, '(in-game, slot conservé)');
             } else {
-                io.to(roomId).emit('playerList', { players: Object.values(room.players) });
+                io.to(roomId).emit('playerList', { players: Object.values(room.players), hostId: room.hostId });
             }
         }
     });
