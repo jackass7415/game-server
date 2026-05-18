@@ -190,6 +190,28 @@ io.on('connection', (socket) => {
     });
 
     // ========================================================================
+    // particleBurst : explosion/effet visuel ponctuel important (mort boss, explosion).
+    // Relay à tous les membres pour qu'ils voient l'effet en sync. Host-only.
+    // ========================================================================
+    socket.on('particleBurst', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        if (socket.id !== rooms[roomId].hostId) return;
+        socket.to(roomId).emit('particleBurst', data);
+    });
+
+    // ========================================================================
+    // chunkGen : l'host vient de générer un chunk Story. Relay aux non-hosts pour qu'ils
+    // appliquent EXACTEMENT les mêmes entités (positions, types, hp). Sécurité : seul l'host.
+    // ========================================================================
+    socket.on('chunkGen', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        if (socket.id !== rooms[roomId].hostId) return;
+        socket.to(roomId).emit('chunkGen', data);
+    });
+
+    // ========================================================================
     // chatMessage : message texte de chat. Broadcast à TOUS les membres de la room
     // (y compris l'expéditeur via io.to, mais le client filtre via fromSlot pour ne pas
     // afficher en double car il affiche "Moi: " localement à l'émission).
