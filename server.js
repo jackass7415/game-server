@@ -190,6 +190,22 @@ io.on('connection', (socket) => {
     });
 
     // ========================================================================
+    // chatMessage : message texte de chat. Broadcast à TOUS les membres de la room
+    // (y compris l'expéditeur via io.to, mais le client filtre via fromSlot pour ne pas
+    // afficher en double car il affiche "Moi: " localement à l'émission).
+    // Sanitize : trim + cap 200 chars + skip si vide.
+    // ========================================================================
+    socket.on('chatMessage', (data) => {
+        const roomId = socket.data.roomId;
+        if (!roomId || !rooms[roomId]) return;
+        const raw = (data && typeof data.text === 'string') ? data.text : '';
+        const text = raw.trim().slice(0, 200);
+        if (!text) return;
+        // Broadcast aux AUTRES membres (l'émetteur affiche déjà localement)
+        socket.to(roomId).emit('chatMessage', { fromSlot: socket.data.slot, text });
+    });
+
+    // ========================================================================
     // startGame : signal de l'host -> tous les clients lancent le mode
     // ========================================================================
     socket.on('startGame', (data) => {
